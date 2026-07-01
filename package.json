@@ -1,0 +1,15 @@
+{
+  "name": "scriptory-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Scriptory jobs ingestion and matching API for South African job discovery.",
+  "scripts": {
+    "start": "node src/server.js",
+    "ingest": "node src/cli/ingest.js",
+    "test": "node tests/run-tests.mjs",
+    "validate": "node tests/run-tests.mjs"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}
