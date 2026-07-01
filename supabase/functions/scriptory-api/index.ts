@@ -1,0 +1,499 @@
+import { createClient } from "supabase";
+import {
+  AnyRecord,
+  buildApplicationKit,
+  clean,
+  configuredSources,
+  int,
+  loadSourceConfig,
+  normalizeJob,
+  normalizeMany,
+  scoreJob
+} from "../_shared/domain.ts";
+
+const functionName = "scriptory-api";
+const supabaseUrl = Deno.env.get("SUPABASE_URL") || "";
+const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
+const adminToken = Deno.env.get("ADMIN_TOKEN") || "";
+
+const db = createClient(supabaseUrl, serviceRoleKey, {
+  auth: { persistSession: false, autoRefreshToken: false }
+});
+
+Deno.serve(async (req) => {
+  const headers = corsHeaders(req.headers.get("origin"));
+  if (req.method === "OPTIONS") return new Response(null, { status: 204, headers });
+
+  try {
+    const url = new URL(req.url);
+    const path = routePath(url.pathname);
+    const result = await route(req, path, url.searchParams, headers);
+    return result;
+  } catch (error) {
+    const status = error.statusCode || 500;
+    if (status === 500) console.error(error);
+    return json({ error: status === 500 ? "Internal server error" : error.message }, status, headers);
+  }
+});
+
+async function route(req: Request, path: string, params: URLSearchParams, headers: HeadersInit): Promise<Response> {
+  if (path === "/health" && req.method === "GET") {
+    return json({ ok: true, service: "searchr-api", runtime: "supabase-edge", time: new Date().toISOString() }, 200, headers);
+  }
+
+  if (path === "/v1/sources" && req.method === "GET") {
+    const settings = loadSourceConfig(Deno.env);
+    const sources = configuredSources(settings).map((source) => ({
+      id: source.id,
+      name: source.name,
+      enabled: source.enabled
+    }));
+    const lastRun = await latestRun();
+    return json({ sources, lastRun }, 200, headers);
+  }
+
+  if (path === "/v1/ingest/run" && req.method === "POST") {
+    requireAdmin(req);
+    const result = await runIngestion("api");
+    return json({ run: result.run, totalJobs: result.totalJobs }, 200, headers);
+  }
+
+  if (path === "/v1/admin/jobs" && req.method === "POST") {
+    requireAdmin(req);
+    const body = await readJson(req);
+    const incoming = normalizeMany(Array.isArray(body) ? body : body.jobs);
+    const upserted = await upsertJobs(incoming);
+    const totalJobs = await countJobs();
+    return json({ added: upserted, totalJobs }, 200, headers);
+  }
+
+  if (path === "/v1/jobs" && req.method === "GET") {
+    const result = await queryJobs(params);
+    return json(result, 200, headers);
+  }
+
+  const jobId = path.match(/^\/v1\/jobs\/([^/]+)$/)?.[1];
+  if (jobId && req.method === "GET") {
+    const job = await findJob(decodeURIComponent(jobId));
+    if (!job) return json({ error: "Not found" }, 404, headers);
+    return json({ job }, 200, headers);
+  }
+
+  if (path === "/v1/matches" && req.method === "POST") {
+    const body = await readJson(req);
+    const cv = body.cv || {};
+    const jobs = body.jobs ? normalizeMany(body.jobs) : await loadActiveJobs(int(body.limit, 100));
+    const limit = clamp(Number(body.limit || 100), 1, 500);
+    const matches = jobs
+      .filter((job) => job.status !== "expired")
+      .map((job) => ({ job, match: scoreJob(cv, job) }))
+      .sort((a, b) => b.match.score - a.match.score)
+      .slice(0, limit);
+    return json({ matches }, 200, headers);
+  }
+
+  if (path === "/v1/application-kits" && req.method === "POST") {
+    const body = await readJson(req);
+    const cv = body.cv || {};
+    const job = body.job ? normalizeJob(body.job) : await findJob(clean(body.jobId));
+    if (!job) return json({ error: "Job not found." }, 404, headers);
+    const match = scoreJob(cv, job);
+    const kit = buildApplicationKit(cv, job, match);
+    return json({ job, match, kit }, 200, headers);
+  }
+
+  if (path === "/v1/applications" && req.method === "GET") {
+    const { data, error } = await db
+      .from("applications")
+      .select("*")
+      .order("started_at", { ascending: false });
+    if (error) throw error;
+    return json({ applications: (data || []).map(mapApplicationRow) }, 200, headers);
+  }
+
+  if (path === "/v1/applications" && req.method === "POST") {
+    const body = await readJson(req);
+    const now = new Date().toISOString();
+    const application = {
+      id: `app-${Date.now()}`,
+      job_id: clean(body.jobId),
+      kit_id: clean(body.kitId),
+      status: clean(body.status || "Started"),
+      method: clean(body.method || "External"),
+      notes: clean(body.notes),
+      started_at: now,
+      submitted_at: body.status === "Submitted" ? now : null,
+      external_application_id: clean(body.externalApplicationId),
+      events: [{ status: clean(body.status || "Started"), at: now }]
+    };
+    const { data, error } = await db.from("applications").insert(application).select("*").single();
+    if (error) throw error;
+    return json({ application: mapApplicationRow(data) }, 201, headers);
+  }
+
+  if (req.method !== "GET" && req.method !== "POST") {
+    return json({ error: "Method not allowed" }, 405, headers);
+  }
+
+  return json({ error: "Not found" }, 404, headers);
+}
+
+function routePath(pathname: string): string {
+  const marker = `/${functionName}`;
+  const index = pathname.indexOf(marker);
+  if (index >= 0) {
+    const rest = pathname.slice(index + marker.length);
+    return rest || "/";
+  }
+  return pathname || "/";
+}
+
+function corsHeaders(origin: string | null): HeadersInit {
+  const allowed = (Deno.env.get("ALLOWED_ORIGINS") || "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+  const allowOrigin = !origin
+    ? "*"
+    : allowed.length === 0 || allowed.includes(origin)
+      ? origin
+      : allowed[0] || "*";
+  return {
+    "access-control-allow-origin": allowOrigin,
+    "access-control-allow-methods": "GET,POST,OPTIONS",
+    "access-control-allow-headers": "content-type,authorization",
+    "access-control-max-age": "86400"
+  };
+}
+
+function json(body: unknown, status = 200, headers: HeadersInit = {}): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+      ...headers
+    }
+  });
+}
+
+async function readJson(req: Request): Promise<AnyRecord> {
+  const text = await req.text();
+  if (!text.trim()) return {};
+  try {
+    return JSON.parse(text);
+  } catch (_error) {
+    const invalid = new Error("Invalid JSON body.") as Error & { statusCode?: number };
+    invalid.statusCode = 400;
+    throw invalid;
+  }
+}
+
+function requireAdmin(req: Request): void {
+  if (!adminToken) return;
+  const token = String(req.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
+  if (token !== adminToken) {
+    const error = new Error("Admin token required.") as Error & { statusCode?: number };
+    error.statusCode = 401;
+    throw error;
+  }
+}
+
+async function queryJobs(params: URLSearchParams): Promise<AnyRecord> {
+  const query = clean(params.get("query")).toLowerCase();
+  const location = clean(params.get("location")).toLowerCase();
+  const source = clean(params.get("source")).toLowerCase();
+  const workplace = clean(params.get("workplace")).toLowerCase();
+  const limit = clamp(Number(params.get("limit") || 100), 1, 500);
+  const offset = clamp(Number(params.get("offset") || 0), 0, 100000);
+  const includeExpired = params.get("includeExpired") === "true";
+
+  let rowsQuery = applyJobFilters(
+    db.from("jobs").select("*", { count: "exact" }),
+    { query, location, source, workplace, includeExpired }
+  )
+    .order("posted_at", { ascending: false })
+    .range(offset, offset + limit - 1);
+
+  const { data, error, count } = await rowsQuery;
+  if (error) throw error;
+
+  const sourceQuery = applyJobFilters(
+    db.from("jobs").select("source"),
+    { query, location, source, workplace, includeExpired }
+  ).range(0, 9999);
+
+  const { data: sourceRows, error: sourceError } = await sourceQuery;
+  if (sourceError) throw sourceError;
+
+  return {
+    total: count || 0,
+    limit,
+    offset,
+    jobs: (data || []).map(mapJobRow),
+    sources: summarizeSources((sourceRows || []).map((row: AnyRecord) => row.source))
+  };
+}
+
+function applyJobFilters(builder: any, filters: AnyRecord): any {
+  let query = builder;
+  if (!filters.includeExpired) query = query.neq("status", "expired");
+  if (filters.query) query = query.ilike("search_text", `%${escapeLike(filters.query)}%`);
+  if (filters.location) query = query.ilike("location_text", `%${escapeLike(filters.location)}%`);
+  if (filters.source) query = query.ilike("source", `%${escapeLike(filters.source)}%`);
+  if (filters.workplace) query = query.eq("workplace_type", filters.workplace);
+  return query;
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[%_]/g, (match) => `\\${match}`);
+}
+
+function summarizeSources(sources: string[]): AnyRecord[] {
+  const counts = new Map<string, number>();
+  sources.forEach((source) => counts.set(source || "Unknown", (counts.get(source || "Unknown") || 0) + 1));
+  return [...counts.entries()].map(([source, count]) => ({ source, count })).sort((a, b) => b.count - a.count);
+}
+
+async function findJob(id: string): Promise<AnyRecord | null> {
+  if (!id) return null;
+  const { data, error } = await db.from("jobs").select("*").eq("id", id).maybeSingle();
+  if (error) throw error;
+  return data ? mapJobRow(data) : null;
+}
+
+async function loadActiveJobs(limit: number): Promise<AnyRecord[]> {
+  const { data, error } = await db
+    .from("jobs")
+    .select("*")
+    .neq("status", "expired")
+    .order("posted_at", { ascending: false })
+    .limit(clamp(limit, 1, 500));
+  if (error) throw error;
+  return (data || []).map(mapJobRow);
+}
+
+async function countJobs(): Promise<number> {
+  const { count, error } = await db.from("jobs").select("id", { count: "exact", head: true }).neq("status", "expired");
+  if (error) throw error;
+  return count || 0;
+}
+
+async function latestRun(): Promise<AnyRecord | null> {
+  const { data, error } = await db
+    .from("ingestion_runs")
+    .select("*")
+    .order("started_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) throw error;
+  return data ? mapRunRow(data) : null;
+}
+
+async function runIngestion(reason: string): Promise<AnyRecord> {
+  const settings = loadSourceConfig(Deno.env);
+  const sources = configuredSources(settings);
+  const startedAt = new Date().toISOString();
+  const reports: AnyRecord[] = [];
+  let fetchedCount = 0;
+  let upsertedCount = 0;
+  let failedCount = 0;
+
+  for (const source of sources) {
+    const report = {
+      id: source.id,
+      name: source.name,
+      enabled: source.enabled,
+      fetched: 0,
+      upserted: 0,
+      failed: 0,
+      error: ""
+    };
+    if (!source.enabled) {
+      reports.push(report);
+      continue;
+    }
+    try {
+      const rawJobs = await source.fetchJobs();
+      const jobs = normalizeMany(rawJobs);
+      report.fetched = rawJobs.length;
+      fetchedCount += rawJobs.length;
+      report.upserted = await upsertJobs(jobs);
+      upsertedCount += report.upserted;
+    } catch (error) {
+      report.error = formatError(error);
+      report.failed += 1;
+      failedCount += 1;
+    }
+    reports.push(report);
+  }
+
+  await markExpiredJobs();
+
+  const run = {
+    id: `run-${Date.now()}`,
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    fetchedCount,
+    upsertedCount,
+    failedCount,
+    sources: reports,
+    reason
+  };
+
+  const { error } = await db.from("ingestion_runs").insert({
+    id: run.id,
+    started_at: run.startedAt,
+    finished_at: run.finishedAt,
+    fetched_count: run.fetchedCount,
+    upserted_count: run.upsertedCount,
+    failed_count: run.failedCount,
+    sources: run.sources
+  });
+  if (error) throw error;
+
+  return { run, totalJobs: await countJobs() };
+}
+
+async function upsertJobs(jobs: AnyRecord[]): Promise<number> {
+  const uniqueJobs = uniqueJobsById(jobs);
+  if (!uniqueJobs.length) return 0;
+  const now = new Date().toISOString();
+  const existing = await existingFirstSeen(uniqueJobs.map((job) => job.id));
+  const rows = uniqueJobs.map((job) => ({
+    id: job.id,
+    source: job.source,
+    external_id: job.externalId,
+    canonical_url: job.canonicalUrl,
+    apply_url: job.applyUrl,
+    title: job.title,
+    company: job.company,
+    description_text: job.descriptionText,
+    location_text: job.locationText,
+    workplace_type: job.workplaceType,
+    employment_type: job.employmentType,
+    salary_min: job.salaryMin,
+    salary_max: job.salaryMax,
+    salary_currency: job.salaryCurrency,
+    posted_at: job.postedAt,
+    expires_at: job.expiresAt,
+    status: "active",
+    category: job.category,
+    requirements: job.requirements || {},
+    content_hash: job.contentHash,
+    raw_payload: job.rawPayload || {},
+    first_seen_at: existing.get(job.id) || now,
+    last_seen_at: now,
+    updated_at: now
+  }));
+
+  for (const chunk of chunks(rows, 20)) {
+    const { error } = await db.from("jobs").upsert(chunk, { onConflict: "id" });
+    if (error) throw error;
+  }
+  return uniqueJobs.length;
+}
+
+function uniqueJobsById(jobs: AnyRecord[]): AnyRecord[] {
+  const map = new Map<string, AnyRecord>();
+  jobs.forEach((job) => {
+    if (job.id) map.set(job.id, job);
+  });
+  return [...map.values()];
+}
+
+function formatError(error: any): string {
+  if (!error || typeof error !== "object") return String(error || "Unknown error");
+  return [error.message, error.code, error.details, error.hint]
+    .map((part) => clean(part))
+    .filter(Boolean)
+    .join(" | ") || "Unknown error";
+}
+
+async function existingFirstSeen(ids: string[]): Promise<Map<string, string>> {
+  const map = new Map<string, string>();
+  for (const chunk of chunks(ids, 20)) {
+    const { data, error } = await db.from("jobs").select("id,first_seen_at").in("id", chunk);
+    if (error) throw error;
+    (data || []).forEach((row: AnyRecord) => map.set(row.id, row.first_seen_at));
+  }
+  return map;
+}
+
+async function markExpiredJobs(): Promise<void> {
+  const now = new Date().toISOString();
+  const { error } = await db
+    .from("jobs")
+    .update({ status: "expired", updated_at: now })
+    .neq("expires_at", "")
+    .lt("expires_at", now);
+  if (error) throw error;
+}
+
+function mapJobRow(row: AnyRecord): AnyRecord {
+  return {
+    id: row.id,
+    source: row.source,
+    externalId: row.external_id,
+    canonicalUrl: row.canonical_url,
+    applyUrl: row.apply_url,
+    title: row.title,
+    company: row.company,
+    descriptionText: row.description_text,
+    locationText: row.location_text,
+    workplaceType: row.workplace_type,
+    employmentType: row.employment_type,
+    salaryMin: row.salary_min === null ? null : Number(row.salary_min),
+    salaryMax: row.salary_max === null ? null : Number(row.salary_max),
+    salaryCurrency: row.salary_currency,
+    postedAt: row.posted_at,
+    expiresAt: row.expires_at,
+    status: row.status,
+    category: row.category,
+    requirements: row.requirements || {},
+    contentHash: row.content_hash,
+    rawPayload: row.raw_payload || {},
+    firstSeenAt: row.first_seen_at,
+    lastSeenAt: row.last_seen_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function mapRunRow(row: AnyRecord): AnyRecord {
+  return {
+    id: row.id,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    fetchedCount: row.fetched_count,
+    upsertedCount: row.upserted_count,
+    failedCount: row.failed_count,
+    sources: row.sources || []
+  };
+}
+
+function mapApplicationRow(row: AnyRecord): AnyRecord {
+  return {
+    id: row.id,
+    jobId: row.job_id,
+    kitId: row.kit_id,
+    status: row.status,
+    method: row.method,
+    notes: row.notes,
+    startedAt: row.started_at,
+    submittedAt: row.submitted_at || "",
+    externalApplicationId: row.external_application_id,
+    events: row.events || []
+  };
+}
+
+function chunks<T>(items: T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    result.push(items.slice(index, index + size));
+  }
+  return result;
+}
+
+function clamp(value: number, min: number, max: number): number {
+  const number = Number.isFinite(value) ? value : min;
+  return Math.min(max, Math.max(min, number));
+}

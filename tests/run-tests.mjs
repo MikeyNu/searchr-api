@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-const dataDir = await mkdtemp(join(tmpdir(), "scriptory-api-"));
+const dataDir = await mkdtemp(join(tmpdir(), "searchr-api-"));
 process.env.DATA_DIR = dataDir;
 
 const { createApiServer } = await import("../src/server.js");

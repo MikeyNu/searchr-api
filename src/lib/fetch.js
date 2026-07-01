@@ -3,7 +3,7 @@ export async function fetchJson(url, options = {}) {
     ...options,
     headers: {
       accept: "application/json",
-      "user-agent": "ScriptoryJobsBot/0.1 (+local development)",
+      "user-agent": "SearchRJobsBot/0.1 (+local development)",
       ...(options.headers || {})
     }
   });
@@ -25,7 +25,7 @@ export async function fetchText(url, options = {}) {
     ...options,
     headers: {
       accept: "text/html,application/json",
-      "user-agent": "ScriptoryJobsBot/0.1 (+local development)",
+      "user-agent": "SearchRJobsBot/0.1 (+local development)",
       ...(options.headers || {})
     }
   });

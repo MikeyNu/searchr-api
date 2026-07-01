@@ -1,0 +1,67 @@
+import assert from "node:assert/strict";
+import { readFile, stat } from "node:fs/promises";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = fileURLToPath(new URL("..", import.meta.url));
+
+const requiredFiles = [
+  "supabase/config.toml",
+  "supabase/.env.example",
+  "supabase/migrations/20260701000000_scriptory_backend.sql",
+  "supabase/functions/scriptory-api/deno.json",
+  "supabase/functions/scriptory-api/index.ts",
+  "supabase/functions/_shared/domain.ts"
+];
+
+for (const file of requiredFiles) {
+  await stat(join(root, file));
+}
+
+const migration = await readFile(join(root, "supabase/migrations/20260701000000_scriptory_backend.sql"), "utf8");
+const indexSource = await readFile(join(root, "supabase/functions/scriptory-api/index.ts"), "utf8");
+const domainSource = await readFile(join(root, "supabase/functions/_shared/domain.ts"), "utf8");
+const envExample = await readFile(join(root, ".env.example"), "utf8");
+const supabaseEnvExample = await readFile(join(root, "supabase/.env.example"), "utf8");
+const config = await readFile(join(root, "supabase/config.toml"), "utf8");
+
+for (const marker of [
+  "create table if not exists public.jobs",
+  "create table if not exists public.ingestion_runs",
+  "create table if not exists public.applications",
+  "enable row level security",
+  "jobs_search_text_trgm_idx"
+]) {
+  assert.ok(migration.includes(marker), `Supabase migration missing marker: ${marker}`);
+}
+
+for (const marker of [
+  "Deno.serve",
+  "/v1/jobs",
+  "/v1/ingest/run",
+  "/v1/application-kits",
+  "SUPABASE_SERVICE_ROLE_KEY"
+]) {
+  assert.ok(indexSource.includes(marker) || config.includes(marker), `Supabase function missing marker: ${marker}`);
+}
+
+for (const marker of [
+  "normalizeJob",
+  "scoreJob",
+  "buildApplicationKit",
+  "configuredSources",
+  "Adzuna South Africa",
+  "Greenhouse",
+  "Lever",
+  "Partner feed"
+]) {
+  assert.ok(domainSource.includes(marker), `Supabase domain layer missing marker: ${marker}`);
+}
+
+for (const source of [envExample, supabaseEnvExample]) {
+  assert.ok(!/ADZUNA_APP_ID=.{4,}/.test(source), "Adzuna app id must not be committed in env examples.");
+  assert.ok(!/ADZUNA_APP_KEY=.{4,}/.test(source), "Adzuna app key must not be committed in env examples.");
+  assert.ok(!/SUPABASE_SERVICE_ROLE_KEY=.{4,}/.test(source), "Supabase service role key must not be committed in env examples.");
+}
+
+console.log("Supabase validation passed: migration, Edge Function, source adapters, and secret hygiene are present.");

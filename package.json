@@ -1,14 +1,20 @@
 {
-  "name": "scriptory-api",
+  "name": "searchr-api",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Scriptory jobs ingestion and matching API for South African job discovery.",
+  "description": "SearchR jobs ingestion and matching API for South African job discovery.",
   "scripts": {
     "start": "node src/server.js",
     "ingest": "node src/cli/ingest.js",
     "test": "node tests/run-tests.mjs",
-    "validate": "node tests/run-tests.mjs"
+    "validate": "node tests/run-tests.mjs && node tests/validate-supabase.mjs",
+    "supabase:setup": "powershell -ExecutionPolicy Bypass -File scripts/setup-supabase.ps1",
+    "supabase:link": "supabase link --project-ref fdtncidguldauilzlxgs",
+    "supabase:serve": "supabase functions serve scriptory-api --env-file supabase/.env",
+    "supabase:deploy": "supabase functions deploy scriptory-api --project-ref fdtncidguldauilzlxgs --no-verify-jwt --use-api",
+    "supabase:secrets:push": "supabase secrets set --env-file supabase/.env --project-ref fdtncidguldauilzlxgs",
+    "supabase:db:push": "supabase db push"
   },
   "dependencies": {},
   "devDependencies": {}

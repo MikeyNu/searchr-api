@@ -1,0 +1,4 @@
+project_id = "fdtncidguldauilzlxgs"
+
+[functions.scriptory-api]
+verify_jwt = false

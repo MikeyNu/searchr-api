@@ -33,7 +33,7 @@ export function createApiServer() {
 
 async function route(req, res, url, headers) {
   if (url.pathname === "/health" && req.method === "GET") {
-    sendJson(res, 200, { ok: true, service: "scriptory-api", time: new Date().toISOString() }, headers);
+    sendJson(res, 200, { ok: true, service: "searchr-api", time: new Date().toISOString() }, headers);
     return;
   }
 
@@ -245,7 +245,7 @@ function clamp(value, min, max) {
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   createApiServer().listen(config.port, () => {
-    console.log(`Scriptory API listening on http://127.0.0.1:${config.port}`);
+    console.log(`SearchR API listening on http://127.0.0.1:${config.port}`);
     startIngestionScheduler();
   });
 }

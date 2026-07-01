@@ -1,87 +1,98 @@
-# Scriptory API
+# SearchR API
 
-Node API for South African job ingestion, matching, application kits, and application tracking.
+Supabase backend for SearchR job ingestion, matching, application kits, and application tracking.
 
-## Sources
+The deployed Edge Function still lives at `supabase/functions/scriptory-api` for compatibility with the existing Supabase project. The older Node server in `src/` remains as a local fallback while the product moves to Supabase.
 
-The API uses permissioned or official sources:
+## Supabase Shape
 
-- Adzuna South Africa API through `/jobs/za/search`.
-- Public ATS job boards for Greenhouse and Lever when employer board slugs are configured.
-- Partner JSON feeds controlled by employers, agencies, training providers, or job boards.
-- Admin job feed upload for private partner imports.
+- `supabase/migrations/20260701000000_scriptory_backend.sql`
+  Creates `jobs`, `ingestion_runs`, and `applications` in Postgres.
+- `supabase/functions/scriptory-api/index.ts`
+  Serves the API as a Supabase Edge Function.
+- `supabase/functions/_shared/domain.ts`
+  Contains job normalization, matching, application kit building, and source adapters.
 
-PNet, CareerJunction, LinkedIn, Indeed, and ESSA are not scraped by default. They are important South African job discovery surfaces, but they should be used through partner access, public feeds, official API agreements, or user-facing outbound links only.
+Supabase Edge Functions run on Deno and are deployed with the Supabase CLI. Database migrations are tracked from `supabase/migrations`.
 
-## South African Job Data
+## Configure Supabase
 
-Start with Adzuna ZA because it has an official jobs API. Add Greenhouse and Lever board slugs for South African employers that publish roles through those ATS platforms. For PNet, CareerJunction, and ESSA, use partner feeds or formal access before ingestion.
+Project:
 
-Useful source links:
-
-- https://developer.adzuna.com/docs/search
-- https://developers.greenhouse.io/job-board.html
-- https://github.com/lever/postings-api
-- https://www.pnet.co.za/
-- https://www.careerjunction.co.za/
-- https://essa.labour.gov.za/EssaOnline/WebBeans/
-
-## Configure
+```text
+ref: fdtncidguldauilzlxgs
+region: eu-west-3
+url: https://fdtncidguldauilzlxgs.supabase.co
+function: https://fdtncidguldauilzlxgs.supabase.co/functions/v1/scriptory-api
+```
 
 ```bash
 cd api
-copy .env.example .env
+copy supabase\.env.example supabase\.env
 ```
 
-Set at least one ingestion source:
+Fill:
 
 ```text
-ADZUNA_APP_ID=your_app_id
-ADZUNA_APP_KEY=your_app_key
+SUPABASE_URL=
+SUPABASE_SERVICE_ROLE_KEY=
+ADZUNA_APP_ID=
+ADZUNA_APP_KEY=
+ADMIN_TOKEN=
 ```
 
-`npm start` and `npm run ingest` read `api/.env` automatically. Environment variables still take priority over `.env` values.
+Keep real keys out of `.env.example`.
 
-The API ingests on startup by default and refreshes every six hours:
+## Deploy
 
-```text
-INGEST_ON_START=true
-INGEST_INTERVAL_MINUTES=360
-```
-
-Optional source lists:
-
-```text
-GREENHOUSE_BOARDS=companyslug
-LEVER_COMPANIES=companyslug
-PARTNER_FEED_URLS=https://partner.example/jobs.json
-```
-
-## Run
+On Windows, use the guarded setup script. It prompts for secrets in the terminal, writes only ignored local env files, links the project, pushes the migration, uploads function secrets, deploys the Edge Function, and checks `/health`.
 
 ```bash
-npm start
+cd api
+npm run supabase:setup
 ```
 
-Default URL:
+Manual path:
+
+```bash
+cd api
+npm run supabase:link
+npm run supabase:db:push
+npm run supabase:secrets:push
+npm run supabase:deploy
+```
+
+Hosted API base:
 
 ```text
-http://127.0.0.1:4000
+https://fdtncidguldauilzlxgs.supabase.co/functions/v1/scriptory-api
 ```
 
-## Ingest
+Local Edge Function:
 
 ```bash
-npm run ingest
+npm run supabase:serve
 ```
 
-Or call:
+Local function base:
 
-```bash
-curl -X POST http://127.0.0.1:4000/v1/ingest/run
+```text
+http://127.0.0.1:54321/functions/v1/scriptory-api
 ```
+
+## Connect Web
+
+Set the web app API base to the Supabase function URL:
+
+```js
+localStorage.setItem("searchr-api-url", "https://fdtncidguldauilzlxgs.supabase.co/functions/v1/scriptory-api");
+```
+
+Then refresh the web app.
 
 ## Endpoints
+
+All routes are under the function base URL.
 
 - `GET /health`
 - `GET /v1/sources`
@@ -94,8 +105,54 @@ curl -X POST http://127.0.0.1:4000/v1/ingest/run
 - `POST /v1/applications`
 - `POST /v1/admin/jobs`
 
-## Test
+Admin endpoints use `Authorization: Bearer <ADMIN_TOKEN>` when `ADMIN_TOKEN` is set.
+
+## Ingestion
+
+Use official or permissioned sources:
+
+- Adzuna South Africa API through `/jobs/za/search`.
+- Public ATS boards for Greenhouse and Lever when employer board slugs are configured.
+- Partner JSON feeds controlled by employers, agencies, training providers, or job boards.
+- Admin job upload for private partner imports.
+
+Run ingestion:
 
 ```bash
-npm test
+curl -X POST \
+  -H "Authorization: Bearer your-admin-token" \
+  https://fdtncidguldauilzlxgs.supabase.co/functions/v1/scriptory-api/v1/ingest/run
 ```
+
+For scheduled ingestion, use Supabase Cron with pg_cron and pg_net to call the Edge Function on your chosen schedule.
+
+## Local Node Fallback
+
+```bash
+cd api
+copy .env.example .env
+npm start
+```
+
+Local Node URL:
+
+```text
+http://127.0.0.1:4000
+```
+
+## Validate
+
+```bash
+npm run validate
+```
+
+This checks the local Node fallback and the Supabase backend files.
+
+## Source Links
+
+- https://supabase.com/docs/guides/functions
+- https://supabase.com/docs/guides/deployment/database-migrations
+- https://supabase.com/docs/guides/functions/schedule-functions
+- https://developer.adzuna.com/docs/search
+- https://developers.greenhouse.io/job-board.html
+- https://github.com/lever/postings-api
