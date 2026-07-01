@@ -3,3 +3,4 @@ data/*.json
 !data/.gitkeep
 supabase/.env
 supabase/.temp
+supabase/**/.temp
