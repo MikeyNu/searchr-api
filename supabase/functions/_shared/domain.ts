@@ -589,17 +589,35 @@ function mapAdzunaJob(item: AnyRecord): AnyRecord {
 }
 
 function createGreenhouseAdapter(boardToken: string): SourceAdapter {
+  const token = normalizeGreenhouseBoardToken(boardToken);
   return {
-    id: `greenhouse-${boardToken}`,
-    name: `Greenhouse ${boardToken}`,
-    enabled: Boolean(boardToken),
+    id: `greenhouse-${token}`,
+    name: `Greenhouse ${token}`,
+    enabled: Boolean(token),
     async fetchJobs() {
-      if (!boardToken) return [];
-      const url = `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(boardToken)}/jobs?content=true`;
+      if (!token) return [];
+      const url = `https://boards-api.greenhouse.io/v1/boards/${encodeURIComponent(token)}/jobs?content=true`;
       const data = await fetchJson(url);
-      return (data.jobs || []).map((item: AnyRecord) => mapGreenhouseJob(item, boardToken));
+      return (data.jobs || []).map((item: AnyRecord) => mapGreenhouseJob(item, token));
     }
   };
+}
+
+function normalizeGreenhouseBoardToken(value: string): string {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (!text.includes("://") && !text.includes("/")) return text;
+  try {
+    const url = new URL(text.includes("://") ? text : `https://${text}`);
+    const parts = url.pathname.split("/").map((part) => part.trim()).filter(Boolean);
+    const boardIndex = parts.indexOf("boards");
+    if (boardIndex >= 0 && parts[boardIndex + 1]) return parts[boardIndex + 1];
+    const jobsIndex = parts.indexOf("jobs");
+    if (jobsIndex > 0) return parts[jobsIndex - 1];
+    return parts[0] || text;
+  } catch (_error) {
+    return text.split("/").filter(Boolean)[0] || text;
+  }
 }
 
 function mapGreenhouseJob(item: AnyRecord, boardToken: string): AnyRecord {
@@ -624,17 +642,71 @@ function mapGreenhouseJob(item: AnyRecord, boardToken: string): AnyRecord {
 }
 
 function createLeverAdapter(companySlug: string): SourceAdapter {
+  const token = normalizeLeverCompanyToken(companySlug);
+  const key = sourceKey(token);
   return {
-    id: `lever-${companySlug}`,
-    name: `Lever ${companySlug}`,
-    enabled: Boolean(companySlug),
+    id: `lever-${key}`,
+    name: `Lever ${token}`,
+    enabled: Boolean(token),
     async fetchJobs() {
-      if (!companySlug) return [];
-      const url = `https://api.lever.co/v0/postings/${encodeURIComponent(companySlug)}?mode=json`;
-      const data = await fetchJson(url);
-      return (Array.isArray(data) ? data : []).map((item: AnyRecord) => mapLeverJob(item, companySlug));
+      if (!token) return [];
+      const data = await fetchLeverPostings(token);
+      return (Array.isArray(data) ? data : []).map((item: AnyRecord) => mapLeverJob(item, token));
     }
   };
+}
+
+async function fetchLeverPostings(token: string): Promise<AnyRecord[]> {
+  const hosts = [
+    "https://api.lever.co",
+    "https://api.eu.lever.co"
+  ];
+  let emptyResult: AnyRecord[] | null = null;
+  let lastError: Error | null = null;
+  for (const host of hosts) {
+    const url = `${host}/v0/postings/${encodeURIComponent(token)}?mode=json`;
+    try {
+      const data = await fetchJson(url);
+      if (!Array.isArray(data)) continue;
+      if (data.length) return data;
+      emptyResult = data;
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+    }
+  }
+  if (emptyResult) return emptyResult;
+  if (lastError) throw lastError;
+  return [];
+}
+
+function normalizeLeverCompanyToken(value: string): string {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (!text.includes("://") && !text.includes("/")) return decodeToken(text);
+  try {
+    const url = new URL(text.includes("://") ? text : `https://${text}`);
+    const parts = url.pathname.split("/").map((part) => part.trim()).filter(Boolean);
+    return decodeToken(parts[0] || text);
+  } catch (_error) {
+    return decodeToken(text.split(/[/?#]/).filter(Boolean).pop() || text);
+  }
+}
+
+function decodeToken(value: string): string {
+  try {
+    return decodeURIComponent(String(value || "").trim());
+  } catch (_error) {
+    return String(value || "").trim();
+  }
+}
+
+function sourceKey(value: string): string {
+  const key = String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return key || "company";
 }
 
 function mapLeverJob(item: AnyRecord, companySlug: string): AnyRecord {

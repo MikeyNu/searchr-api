@@ -136,9 +136,11 @@ The auth trigger creates a profile, settings row, notification preferences row, 
 Use official or permissioned sources:
 
 - Adzuna South Africa API through `/jobs/za/search`.
-- Public ATS boards for Greenhouse and Lever when employer board slugs are configured.
+- Public ATS boards for Greenhouse and Lever when employer board slugs or careers URLs are configured.
 - Partner JSON feeds controlled by employers, agencies, training providers, or job boards.
 - Admin job upload for private partner imports.
+
+Lever accepts either the board slug or the public careers URL. The adapter checks both the global Lever postings API and the EU Lever postings API so boards that live on either host still ingest correctly.
 
 Run ingestion:
 
